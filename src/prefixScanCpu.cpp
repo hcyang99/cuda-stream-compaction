@@ -10,6 +10,17 @@ void prefixScanCpu(uint32_t* data, uint32_t* out, size_t size)
     }
 }
 
+void prefixScanCpuPartial(uint32_t* data, uint32_t* out, size_t size)
+{
+    uint32_t sum;
+    for (size_t i = 0; i < size; ++i)
+    {
+        if (i % 1024 == 0) sum = 0;
+        out[i] = sum;
+        sum += data[i];
+    }
+}
+
 void genInput(uint32_t* data, size_t size)
 {
     srand(7);
