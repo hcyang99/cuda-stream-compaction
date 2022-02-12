@@ -1,5 +1,5 @@
 #!/bin/sh
-
+# nvcc --help
 # Change directory (DO NOT CHANGE!)
 repoDir=$(dirname "$(realpath "$0")")
 echo $repoDir

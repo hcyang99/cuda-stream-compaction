@@ -23,10 +23,16 @@ void test(size_t size)
     FILE* f_in = fopen("../h_in.txt", "w");
     FILE* f_out_cpu = fopen("../h_out_cpu.txt", "w");
     FILE* f_out_gpu = fopen("../h_out_gpu.txt", "w");
+
+    size_t aligned;
+    if (size % 1024 != 0)
+        aligned = (size / 1024 + 1) * 1024;
+    else 
+        aligned = size;
     
-    h_in = new uint32_t[size]();
-    h_out_cpu = new uint32_t[size];
-    h_out_gpu = new uint32_t[size];
+    h_in = new uint32_t[aligned]();
+    h_out_cpu = new uint32_t[aligned];
+    h_out_gpu = new uint32_t[aligned];
     if (h_in == nullptr || h_out_cpu == nullptr || h_out_gpu == nullptr)
     {
         fprintf(stderr, "Malloc failed!\n");
@@ -34,11 +40,11 @@ void test(size_t size)
     }
 
     genInput(h_in, size);
-    prefixScanCpuPartial(h_in, h_out_cpu, size);
+    prefixScanCpu(h_in, h_out_cpu, size);
 
     fprintf(stderr, "Testing size %llu ... ", size);
 
-    prefixScanGpuPartial(h_in, h_out_gpu, size);
+    testPrefixScanGpu(h_in, h_out_gpu, size);
 
     bool flag = true;
     for (size_t i = 0; i < size; ++i)
@@ -55,10 +61,14 @@ void test(size_t size)
         fprintf(stderr, "SUCCESS\n");
     else 
     {
-        printArray(h_in, size, "h_in", f_in);
-        printArray(h_out_cpu, size, "h_out_cpu", f_out_cpu);
-        printArray(h_out_gpu, size, "h_out_gpu", f_out_gpu);
+        // printArray(h_in, size, "h_in", f_in);
+        // printArray(h_out_cpu, size, "h_out_cpu", f_out_cpu);
+        // printArray(h_out_gpu, size, "h_out_gpu", f_out_gpu);
     }
+
+    // printArray(h_in, size, "h_in", f_in);
+    // printArray(h_out_cpu, size, "h_out_cpu", f_out_cpu);
+    // printArray(h_out_gpu, size, "h_out_gpu", f_out_gpu);
     
     delete[] h_in;
     delete[] h_out_cpu;
@@ -70,8 +80,9 @@ void test(size_t size)
 
 int main()
 {
-    test(1024);
-    test(16*1024);
-    test(384*1024);
-    test(512*1024);
+    test(4*1024-1);
+    test(16*1024+724);
+    test(384*1024+74);
+    test(512*1024-46);
+    test(4*1024*1024 + 16);
 }

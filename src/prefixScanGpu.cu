@@ -2,7 +2,6 @@
 #include <stdio.h>
 
 #define LOG_NUM_BANKS 5 
-// #define CONFLICT_FREE_OFFSET(n) 0
 #define CONFLICT_FREE_OFFSET(n) ((n) >> LOG_NUM_BANKS) 
 
 
@@ -126,6 +125,156 @@ prescan_partial(uint32_t *g_odata, uint32_t *g_idata, uint32_t n)
         g_odata[2*tx + 1 + batch * 1024] = temp[bi];
     }
 }
+
+__global__ void
+prescan_add(uint32_t* d_out, uint32_t* d_in, uint32_t num_batches)
+{
+    int bx = blockIdx.x;
+    int tx = threadIdx.x; 
+    int gs = gridDim.x;
+    int bs = blockDim.x;
+
+    int batch_size = num_batches / gs + 1;
+    int batch_start = bx * batch_size;
+    int batch_end = (bx + 1) * batch_size;
+    if (batch_end > num_batches) batch_end = num_batches;
+
+    for (uint32_t i = batch_start * 1024 + tx; i < batch_end * 1024; i += bs)
+    {
+        d_out[i] += d_in[i / 1024];
+    }
+}
+
+__global__ void
+prescan_sum(uint32_t* d_out, uint32_t* d_in, uint32_t num_batches)
+{
+    __shared__ uint32_t s[32];
+    int bx = blockIdx.x;
+    int tx = threadIdx.x; 
+    int gs = gridDim.x;
+    int bs = blockDim.x;
+
+    int batch_size = num_batches / gs + 1;
+    int batch_start = bx * batch_size;
+    int batch_end = (bx + 1) * batch_size;
+    if (batch_end > num_batches) batch_end = num_batches;
+
+    for (int batch = batch_start; batch < batch_end; ++batch)
+    {
+        uint32_t local_sum = 0;
+        for (int i = tx; i < 1024; i += bs)
+        {
+            local_sum += d_in[i + batch * 1024];
+        }
+        s[tx] = local_sum;
+        __syncthreads();
+        if (tx == 0)
+        {
+            uint32_t master_sum = 0;
+            for (int i = 0; i < bs; ++i)
+            {
+                master_sum += s[i];
+            }
+            d_out[batch] = master_sum;
+        }
+        __syncthreads();
+    }
+
+    if (bx == gs - 1)
+    {
+        uint32_t num_batch_aligned = num_batches;
+        if (num_batches % 1024 != 0) num_batch_aligned = (num_batches / 1024 + 1) * 1024;
+        for (int i = num_batches + tx; i < num_batch_aligned; i += 32)
+            d_out[i] = 0;
+    }
+}
+
+void prefixScanGpu(uint32_t* d_in, uint32_t* d_out, size_t length)
+{
+    int numBlocks = 128; // i.e. number of thread blocks on the GPU
+    int blockSize = 512; // i.e. number of GPU threads per thread block
+
+    if (length <= 1024)
+    {
+        // fprintf(stderr, "Call: prescan_single_block\n");
+        prescan_single_block<<<1, 512>>>(d_out, d_in, 1024);
+    } 
+    else 
+    {
+        // call partial scan
+        size_t aligned_length;
+        if (length % 1024 == 0) aligned_length = length; else aligned_length = (length / 1024 + 1) * 1024;
+        prescan_partial<<<128,512>>>(d_out, d_in, aligned_length);
+
+        // call sum
+        size_t sum_length, sum_aligned;
+        uint32_t* sum_out;
+        sum_length = aligned_length / 1024;
+        if (sum_length % 1024 == 0) sum_aligned = sum_length; else sum_aligned = (sum_length / 1024 + 1) * 1024;
+        auto err = cudaMalloc(&sum_out, sum_aligned*sizeof(uint32_t));
+        if (err != cudaSuccess) {
+            fprintf(stderr, "GPU_ERROR: cudaMalloc failed!\n");
+            exit(1);
+        }
+        prescan_sum<<<512,32>>>(sum_out, d_in, sum_length);
+
+        // call recursive scan
+        uint32_t* sum_scanned;
+        err = cudaMalloc(&sum_scanned, sum_aligned*sizeof(uint32_t));
+        if (err != cudaSuccess) {
+            fprintf(stderr, "GPU_ERROR: cudaMalloc failed!\n");
+            exit(1);
+        }
+        prefixScanGpu(sum_out, sum_scanned, sum_length);
+ 
+
+        // call scatter add
+        prescan_add<<<128, 512>>>(d_out, sum_scanned, sum_length);
+
+        // free memory
+        cudaFree(sum_out);
+        cudaFree(sum_scanned);
+    }
+}
+
+void testPrefixScanGpu(uint32_t* h_in, uint32_t* h_out, size_t size)
+{
+    uint32_t* d_in;
+    uint32_t* d_out;
+    uint32_t aligned;
+    if (size % 1024 != 0)
+        aligned = (size / 1024 + 1) * 1024;
+    else 
+        aligned = size;
+
+    auto err = cudaMalloc(&d_in, aligned*sizeof(uint32_t));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "GPU_ERROR: cudaMalloc failed!\n");
+        exit(1);
+    }
+    err = cudaMalloc(&d_out, aligned*sizeof(uint32_t));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "GPU_ERROR: cudaMalloc failed!\n");
+        exit(1);
+    }
+    err = cudaMemcpy(d_in, h_in, aligned*sizeof(uint32_t), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "GPU_ERROR: cudaMemCpy failed!\n");
+        exit(1);
+    }
+
+    prefixScanGpu(d_in, d_out, size);
+
+    err = cudaMemcpy(h_out, d_out, aligned*sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "GPU_ERROR: cudaMemCpy failed!\n");
+        exit(1);
+    }
+
+    cudaFree(d_in);
+    cudaFree(d_out);
+}
+
 
 void prefixScanGpuSingleBlock(uint32_t* h_in, uint32_t* h_out, size_t length)
 {
